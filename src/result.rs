@@ -1,37 +1,110 @@
 use std::error;
 use std::fmt::{self, Display};
 
+#[derive(Clone)]
+pub struct ErrorMessage<'a>(std::sync::Arc<dyn Fn() -> String + 'a>);
+
+impl<'a> ErrorMessage<'a> {
+	pub fn new<F: Fn() -> String + 'a>(f: F) -> Self {
+		ErrorMessage(std::sync::Arc::new(f))
+	}
+
+	pub fn evaluate(self) -> ErrorMessage<'static> {
+		let s = self.to_string();
+		ErrorMessage::new(move || s.clone())
+	}
+}
+
+impl<'a> fmt::Debug for ErrorMessage<'a> {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}", (self.0)())
+	}
+}
+
+impl<'a> Display for ErrorMessage<'a> {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}", (self.0)())
+	}
+}
+
 /// Parser error.
-#[derive(Debug, PartialEq, Clone)]
-pub enum Error {
+#[derive(Debug, Clone)]
+pub enum Error<'a> {
 	Incomplete,
 	Mismatch {
-		message: String,
+		message: ErrorMessage<'a>,
 		position: usize,
 	},
 	Conversion {
-		message: String,
+		message: ErrorMessage<'a>,
 		position: usize,
 	},
 	Expect {
-		message: String,
+		message: ErrorMessage<'a>,
 		position: usize,
-		inner: Box<Error>,
+		inner: Box<Error<'a>>,
 	},
 	Custom {
-		message: String,
+		message: ErrorMessage<'a>,
 		position: usize,
-		inner: Option<Box<Error>>,
+		inner: Option<Box<Error<'a>>>,
 	},
 }
 
-impl error::Error for Error {
+impl<'a> Error<'a> {
+	pub fn evaluate(self) -> Error<'static> {
+		match self {
+			Error::Incomplete => Error::Incomplete,
+			Error::Mismatch { message, position } => Error::Mismatch {
+				message: message.evaluate(),
+				position,
+			},
+			Error::Conversion { message, position } => Error::Conversion {
+				message: message.evaluate(),
+				position,
+			},
+			Error::Expect {
+				message,
+				position,
+				inner,
+			} => Error::Expect {
+				message: message.evaluate(),
+				position,
+				inner: Box::new(inner.evaluate()),
+			},
+			Error::Custom {
+				message,
+				position,
+				inner,
+			} => Error::Custom {
+				message: message.evaluate(),
+				position,
+				inner: inner.map(|inner| Box::new(inner.evaluate())),
+			},
+		}
+	}
+}
+
+impl<'a, 'b> PartialEq<Error<'b>> for Error<'a> {
+	fn eq(&self, other: &Error<'b>) -> bool {
+		match (self, other) {
+			(Error::Incomplete, Error::Incomplete) => true,
+			(Error::Mismatch { .. }, Error::Mismatch { .. }) => true,
+			(Error::Conversion { .. }, Error::Conversion { .. }) => true,
+			(Error::Expect { .. }, Error::Expect { .. }) => true,
+			(Error::Custom { .. }, Error::Custom { .. }) => true,
+			_ => false,
+		}
+	}
+}
+
+impl<'a> error::Error for Error<'a> {
 	fn description(&self) -> &'static str {
 		"Parse error"
 	}
 }
 
-impl Display for Error {
+impl<'a> Display for Error<'a> {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match self {
 			Error::Incomplete => write!(f, "Incomplete"),
@@ -63,4 +136,4 @@ impl Display for Error {
 }
 
 /// Parser result, `Result<O>` ia alias of `Result<O, pom::Error>`.
-pub type Result<O> = ::std::result::Result<O, Error>;
+pub type Result<'a, O> = ::std::result::Result<O, Error<'a>>;

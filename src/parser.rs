@@ -1,11 +1,12 @@
 use super::{Error, Result};
 use crate::range::Bound::*;
 use crate::range::RangeArgument;
+use crate::result::ErrorMessage;
 use crate::set::Set;
 use std::fmt::{Debug, Display};
 use std::ops::{Add, BitOr, Mul, Neg, Not, Shr, Sub};
 
-type Parse<'a, I, O> = dyn Fn(&'a [I], usize) -> Result<(O, usize)> + 'a;
+type Parse<'a, I, O> = dyn Fn(&'a [I], usize) -> Result<'a, (O, usize)> + 'a;
 
 /// Parser combinator.
 pub struct Parser<'a, I, O> {
@@ -24,12 +25,22 @@ impl<'a, I, O> Parser<'a, I, O> {
 	}
 
 	/// Apply the parser to parse input.
-	pub fn parse(&self, input: &'a [I]) -> Result<O> {
-		(self.method)(input, 0).map(|(out, _)| out)
+	pub fn parse(&self, input: &'a [I]) -> Result<'static, O> {
+		self.parse_ref(input).map_err(|e| e.evaluate())
 	}
 
 	/// Parse input at specified position.
-	pub fn parse_at(&self, input: &'a [I], start: usize) -> Result<(O, usize)> {
+	pub fn parse_at(&self, input: &'a [I], start: usize) -> Result<'static, (O, usize)> {
+		self.parse_at_ref(input, start).map_err(|e| e.evaluate())
+	}
+
+	/// Apply the parser to parse input, returning a result that has an error referencing the input.
+	pub fn parse_ref(&self, input: &'a [I]) -> Result<'a, O> {
+		(self.method)(input, 0).map(|(out, _)| out)
+	}
+
+	/// Parse input at specified position, returning a result that has an error referencing the input.
+	pub fn parse_at_ref(&self, input: &'a [I], start: usize) -> Result<'a, (O, usize)> {
 		(self.method)(input, start)
 	}
 
@@ -50,7 +61,7 @@ impl<'a, I, O> Parser<'a, I, O> {
 	pub fn convert<U, E, F>(self, f: F) -> Parser<'a, I, U>
 	where
 		F: Fn(O) -> ::std::result::Result<U, E> + 'a,
-		E: Debug,
+		E: Debug + 'a,
 		O: 'a,
 		U: 'a,
 	{
@@ -58,7 +69,7 @@ impl<'a, I, O> Parser<'a, I, O> {
 			(self.method)(input, start).and_then(|(res, pos)| match f(res) {
 				Ok(out) => Ok((out, pos)),
 				Err(err) => Err(Error::Conversion {
-					message: format!("Conversion error: {:?}", err),
+					message: ErrorMessage::new(move || format!("Conversion error: {:?}", err)),
 					position: start,
 				}),
 			})
@@ -162,12 +173,14 @@ impl<'a, I, O> Parser<'a, I, O> {
 			}
 			if let Included(&min_count) = range.start() {
 				if items.len() < min_count {
+					let len = items.len();
 					return Err(Error::Mismatch {
-						message: format!(
-							"expect repeat at least {} times, found {} times",
-							min_count,
-							items.len()
-						),
+						message: ErrorMessage::new(move || {
+							format!(
+								"expect repeat at least {} times, found {} times",
+								min_count, len
+							)
+						}),
 						position: start,
 					});
 				}
@@ -187,7 +200,7 @@ impl<'a, I, O> Parser<'a, I, O> {
 				Err(err) => match err {
 					Error::Custom { .. } => Err(err),
 					_ => Err(Error::Custom {
-						message: format!("failed to parse {}", name),
+						message: ErrorMessage::new(move || format!("failed to parse {}", name)),
 						position: start,
 						inner: Some(Box::new(err)),
 					}),
@@ -205,7 +218,7 @@ impl<'a, I, O> Parser<'a, I, O> {
 			move |input: &'a [I], start: usize| match (self.method)(input, start) {
 				res @ Ok(_) => res,
 				Err(err) => Err(Error::Expect {
-					message: format!("Expect {}", name),
+					message: ErrorMessage::new(move || format!("Expect {}", name)),
 					position: start,
 					inner: Box::new(err),
 				}),
@@ -223,15 +236,17 @@ pub fn empty<'a, I>() -> Parser<'a, I, ()> {
 pub fn sym<'a, T, I>(t: I) -> Parser<'a, T, T>
 where
 	I: PartialEq<T> + Display + 'a,
-	T: Clone + Display
+	T: Clone + Display,
 {
+	let t = std::sync::Arc::new(t);
 	Parser::new(move |input: &'a [T], start: usize| {
 		if let Some(s) = input.get(start) {
-			if t == *s {
+			if *t == *s {
 				Ok((s.clone(), start + 1))
 			} else {
+				let t = t.clone();
 				Err(Error::Mismatch {
-					message: format!("expect: {}, found: {}", t, s),
+					message: ErrorMessage::new(move || format!("expect: {}, found: {}", t, s)),
 					position: start,
 				})
 			}
@@ -245,7 +260,7 @@ where
 pub fn seq<'a, 'b: 'a, T, I>(tag: &'b [I]) -> Parser<'a, T, &'a [I]>
 where
 	I: PartialEq<T> + Display + Debug,
-	T: Display
+	T: Display,
 {
 	Parser::new(move |input: &'a [T], start: usize| {
 		let mut index = 0;
@@ -257,7 +272,9 @@ where
 			if let Some(s) = input.get(pos) {
 				if tag[index] != *s {
 					return Err(Error::Mismatch {
-						message: format!("seq {:?} expect: {}, found: {}", tag, tag[index], s),
+						message: ErrorMessage::new(move || {
+							format!("seq {:?} expect: {}, found: {}", tag, tag[index], s)
+						}),
 						position: pos,
 					});
 				}
@@ -277,7 +294,9 @@ pub fn tag<'a, 'b: 'a>(tag: &'b str) -> Parser<'a, char, &'a str> {
 			if let Some(&s) = input.get(pos) {
 				if c != s {
 					return Err(Error::Mismatch {
-						message: format!("tag {:?} expect: {:?}, found: {}", tag, c, s),
+						message: ErrorMessage::new(move || {
+							format!("tag {:?} expect: {:?}, found: {}", tag, c, s)
+						}),
 						position: pos,
 					});
 				}
@@ -323,7 +342,7 @@ where
 pub fn one_of<'a, T, I, S>(set: &'a S) -> Parser<'a, T, T>
 where
 	T: Clone + Display,
-	S: Set<I,T> + ?Sized,
+	S: Set<I, T> + ?Sized,
 {
 	Parser::new(move |input: &'a [T], start: usize| {
 		if let Some(s) = input.get(start) {
@@ -331,7 +350,9 @@ where
 				Ok((s.clone(), start + 1))
 			} else {
 				Err(Error::Mismatch {
-					message: format!("expect one of: {}, found: {}", set.to_str(), s),
+					message: ErrorMessage::new(move || {
+						format!("expect one of: {}, found: {}", set.to_str(), s)
+					}),
 					position: start,
 				})
 			}
@@ -345,13 +366,15 @@ where
 pub fn none_of<'a, T, I, S>(set: &'static S) -> Parser<'a, T, T>
 where
 	T: Clone + Display,
-	S: Set<I,T> + ?Sized,
+	S: Set<I, T> + ?Sized,
 {
 	Parser::new(move |input: &'a [T], start: usize| {
 		if let Some(s) = input.get(start) {
 			if set.contains(s) {
 				Err(Error::Mismatch {
-					message: format!("expect none of: {}, found: {}", set.to_str(), s),
+					message: ErrorMessage::new(move || {
+						format!("expect none of: {}, found: {}", set.to_str(), s)
+					}),
 					position: start,
 				})
 			} else {
@@ -375,7 +398,7 @@ where
 				Ok((s.clone(), start + 1))
 			} else {
 				Err(Error::Mismatch {
-					message: format!("is_a predicate failed on: {}", s),
+					message: ErrorMessage::new(move || format!("is_a predicate failed on: {}", s)),
 					position: start,
 				})
 			}
@@ -395,7 +418,7 @@ where
 		if let Some(s) = input.get(start) {
 			if predicate(s.clone()) {
 				Err(Error::Mismatch {
-					message: format!("not_a predicate failed on: {}", s),
+					message: ErrorMessage::new(move || format!("not_a predicate failed on: {}", s)),
 					position: start,
 				})
 			} else {
@@ -408,8 +431,7 @@ where
 }
 
 /// Read n symbols.
-pub fn take<'a, I>(n: usize) -> Parser<'a, I, &'a [I]>
-{
+pub fn take<'a, I>(n: usize) -> Parser<'a, I, &'a [I]> {
 	Parser::new(move |input: &'a [I], start: usize| {
 		let pos = start + n;
 		if input.len() >= pos {
@@ -421,8 +443,7 @@ pub fn take<'a, I>(n: usize) -> Parser<'a, I, &'a [I]>
 }
 
 /// Skip n symbols.
-pub fn skip<'a, I>(n: usize) -> Parser<'a, I, ()>
-{
+pub fn skip<'a, I>(n: usize) -> Parser<'a, I, ()> {
 	Parser::new(move |input: &'a [I], start: usize| {
 		let pos = start + n;
 		if input.len() >= pos {
@@ -453,7 +474,7 @@ where
 	Parser::new(|input: &'a [I], start: usize| {
 		if let Some(s) = input.get(start) {
 			Err(Error::Mismatch {
-				message: format!("expect end of input, found: {}", s),
+				message: ErrorMessage::new(move || format!("expect end of input, found: {}", s)),
 				position: start,
 			})
 		} else {
@@ -546,7 +567,7 @@ impl<'a, I, O: 'a> Not for Parser<'a, I, O> {
 		Parser::new(
 			move |input: &'a [I], start: usize| match (self.method)(input, start) {
 				Ok(_) => Err(Error::Mismatch {
-					message: "not predicate failed".to_string(),
+					message: ErrorMessage::new(move || "not predicate failed".to_string()),
 					position: start,
 				}),
 				Err(_) => Ok((true, start)),
@@ -568,7 +589,7 @@ mod tests {
 		assert_eq!(
 			output,
 			Err(Error::Mismatch {
-				message: "expect: 67, found: 99".to_string(),
+				message: ErrorMessage::new(move || "expect: 67, found: 99".to_string()),
 				position: 2
 			})
 		);
@@ -576,6 +597,7 @@ mod tests {
 		let parser = sym(b'a') * none_of(b"AB") - sym(b'c') + seq(b"de");
 		let output = parser.parse(input);
 		assert_eq!(output, Ok((b'b', &b"de"[..])));
+		drop(output);
 		assert_eq!(parser.pos().parse(input), Ok(5));
 
 		let parser = sym(b'e') | sym(b'd').expect("d") | empty().map(|_| b'0');
@@ -583,10 +605,10 @@ mod tests {
 		assert_eq!(
 			output,
 			Err(Error::Expect {
-				message: "Expect d".to_owned(),
+				message: ErrorMessage::new(move || "Expect d".to_owned()),
 				position: 0,
 				inner: Box::new(Error::Mismatch {
-					message: "expect: 100, found: 97".to_string(),
+					message: ErrorMessage::new(move || "expect: 100, found: 97".to_string()),
 					position: 0
 				})
 			})
