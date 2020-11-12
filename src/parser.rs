@@ -1,12 +1,12 @@
-use super::{Error, Result};
+use super::Result;
 use crate::range::Bound::*;
 use crate::range::RangeArgument;
-use crate::result::ErrorMessage;
+use crate::result::{ErrorDelayed as Error, ErrorMessage, ResultDelayed};
 use crate::set::Set;
 use std::fmt::{Debug, Display};
 use std::ops::{Add, BitOr, Mul, Neg, Not, Shr, Sub};
 
-type Parse<'a, I, O> = dyn Fn(&'a [I], usize) -> Result<'a, (O, usize)> + 'a;
+type Parse<'a, I, O> = dyn Fn(&'a [I], usize) -> ResultDelayed<'a, (O, usize)> + 'a;
 
 /// Parser combinator.
 pub struct Parser<'a, I, O> {
@@ -17,7 +17,7 @@ impl<'a, I, O> Parser<'a, I, O> {
 	/// Create new parser.
 	pub fn new<P>(parse: P) -> Parser<'a, I, O>
 	where
-		P: Fn(&'a [I], usize) -> Result<(O, usize)> + 'a,
+		P: Fn(&'a [I], usize) -> ResultDelayed<(O, usize)> + 'a,
 	{
 		Parser {
 			method: Box::new(parse),
@@ -25,22 +25,22 @@ impl<'a, I, O> Parser<'a, I, O> {
 	}
 
 	/// Apply the parser to parse input.
-	pub fn parse(&self, input: &'a [I]) -> Result<'static, O> {
+	pub fn parse(&self, input: &'a [I]) -> Result<O> {
 		self.parse_ref(input).map_err(|e| e.evaluate())
 	}
 
 	/// Parse input at specified position.
-	pub fn parse_at(&self, input: &'a [I], start: usize) -> Result<'static, (O, usize)> {
+	pub fn parse_at(&self, input: &'a [I], start: usize) -> Result<(O, usize)> {
 		self.parse_at_ref(input, start).map_err(|e| e.evaluate())
 	}
 
 	/// Apply the parser to parse input, returning a result that has an error referencing the input.
-	pub fn parse_ref(&self, input: &'a [I]) -> Result<'a, O> {
+	pub fn parse_ref(&self, input: &'a [I]) -> ResultDelayed<'a, O> {
 		(self.method)(input, 0).map(|(out, _)| out)
 	}
 
 	/// Parse input at specified position, returning a result that has an error referencing the input.
-	pub fn parse_at_ref(&self, input: &'a [I], start: usize) -> Result<'a, (O, usize)> {
+	pub fn parse_at_ref(&self, input: &'a [I], start: usize) -> ResultDelayed<'a, (O, usize)> {
 		(self.method)(input, start)
 	}
 
@@ -589,7 +589,7 @@ mod tests {
 		assert_eq!(
 			output,
 			Err(Error::Mismatch {
-				message: ErrorMessage::new(move || "expect: 67, found: 99".to_string()),
+				message: "expect: 67, found: 99".to_string(),
 				position: 2
 			})
 		);
@@ -605,10 +605,10 @@ mod tests {
 		assert_eq!(
 			output,
 			Err(Error::Expect {
-				message: ErrorMessage::new(move || "Expect d".to_owned()),
+				message: "Expect d".to_owned(),
 				position: 0,
 				inner: Box::new(Error::Mismatch {
-					message: ErrorMessage::new(move || "expect: 100, found: 97".to_string()),
+					message: "expect: 100, found: 97".to_string(),
 					position: 0
 				})
 			})
@@ -659,10 +659,10 @@ mod tests {
 		{
 			let parser = Parser::new(move |input, start| {
 				(skip(1) * take(3))
-					.parse_at(input, start)
+					.parse_at_ref(input, start)
 					.and_then(|(v, pos)| {
 						take(v.len() + 2)
-							.parse_at(input, pos)
+							.parse_at_ref(input, pos)
 							.map(|(u, end)| ((u, v), end))
 					})
 			});
