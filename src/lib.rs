@@ -1,5 +1,5 @@
 pub mod range;
-mod result;
+pub mod result;
 pub mod set;
 
 /// Constains predefined parsers and combinators.
